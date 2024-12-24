@@ -29,7 +29,7 @@ class ClassificationMetrics:
 
 
 class RegressionMetrics:
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer=None):
         self.tokenizer = tokenizer
 
     def process_predictions(self, predictions, tokenizer):
@@ -52,6 +52,8 @@ class RegressionMetrics:
             
             # Decode the prediction (list of token IDs to string)
             decoded_text = tokenizer.decode(token_ids, skip_special_tokens=True)
+
+            #print('decoded_text', decoded_text)
             
             # Extract numerical value using regex
             match = re.search(r'[-+]?\d*\.\d+|\d+', decoded_text)
@@ -67,7 +69,8 @@ class RegressionMetrics:
         predictions, labels = eval_pred
 
         # Decode predictions and convert to numerical values
-        predictions = self.process_predictions(predictions, self.tokenizer)  # Shape: (batch,)
+        if self.tokenizer is not None:
+            predictions = self.process_predictions(predictions, self.tokenizer)  # Shape: (batch,)
         
         # Ensure labels are numpy arrays for metrics calculation
         labels = np.array(labels)
