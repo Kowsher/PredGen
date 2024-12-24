@@ -8,6 +8,133 @@ from transformers.cache_utils import Cache
 import torch.nn.functional as F
 import random
 
+
+from transformers import LlamaPreTrainedModel, LlamaModel
+from transformers.generation import GenerationMixin
+import torch
+from torch import nn
+from typing import Callable, List, Optional, Tuple, Union
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+    QuestionAnsweringModelOutput,
+    SequenceClassifierOutputWithPast,
+    TokenClassifierOutput,
+)
+
+from torch.nn import CrossEntropyLoss
+# Define all attention functions in a dictionary or list
+
+
+class CausalLM(LlamaPreTrainedModel, GenerationMixin):
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.model = LlamaModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.loss_function = CrossEntropyLoss()
+        self.gen_tok = config.nub_of_token_generation
+        self.pad_token_id = config.pad_token_id
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def set_decoder(self, decoder):
+        self.model = decoder
+
+    def get_decoder(self):
+        return self.model
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        num_logits_to_keep: int = 0,
+   
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        llm_labels = input_ids.clone()
+        llm_labels[llm_labels == 2] = -100
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+           
+        )
+
+        hidden_states = outputs[0]
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+
+        loss = None
+        if llm_labels is not None:
+
+            logits = logits.float()
+    
+            # Shift logits and labels to align for next-token prediction
+            shift_logits = logits[..., :-1, :].contiguous()  # Drop the last token in logits
+            shift_labels = llm_labels[..., 1:].contiguous()  # Drop the first token in labels
+    
+            # Flatten the tokens for loss calculation
+            shift_logits = shift_logits.view(-1, self.vocab_size)  # Shape: (batch_size * (seq_len-1), vocab_size)
+            shift_labels = shift_labels.view(-1)  # Shape: (batch_size * (seq_len-1))
+    
+            # Move labels to the same device as logits (important for model parallelism)
+            shift_labels = shift_labels.to(shift_logits.device)
+    
+            # Compute the loss using CrossEntropyLoss
+            loss = self.loss_function(shift_logits, shift_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits[:, -self.gen_tok:, :],
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+
 class PredictorCausalLM(PreTrainedModel):
     def __init__(self, config, num_labels):
         super().__init__(config)
